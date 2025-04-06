@@ -10,57 +10,69 @@
         android:id="@+id/photoImageView"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:layout_marginHorizontal="16dp"
-        android:layout_marginTop="16dp"
+        android:layout_marginHorizontal="24dp"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="100dp"
         android:scaleType="fitCenter"
         android:background="@drawable/image_background"
         android:src="@drawable/ic_launcher_foreground"
-        app:layout_constraintBottom_toTopOf="@+id/buttonContainer"
+        android:elevation="4dp"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintDimensionRatio="1:1"
         android:contentDescription="Selected photo" />
 
-    <LinearLayout
-        android:id="@+id/buttonContainer"
-        android:layout_width="match_parent"
+    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        android:id="@+id/galleryFab"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center"
-        android:padding="16dp"
+        android:layout_marginEnd="24dp"
         android:layout_marginBottom="16dp"
-        app:layout_constraintBottom_toBottomOf="parent">
+        android:src="@android:drawable/ic_menu_gallery"
+        app:fabSize="normal"
+        app:elevation="6dp"
+        app:backgroundTint="@color/white"
+        app:tint="@color/purple_500"
+        app:borderWidth="0dp"
+        app:layout_constraintBottom_toTopOf="@id/cameraFab"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:contentDescription="Open Gallery" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/galleryButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginEnd="8dp"
-            android:text="Gallery"
-            app:icon="@android:drawable/ic_menu_gallery"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        android:id="@+id/cameraFab"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="88dp"
+        android:src="@android:drawable/ic_menu_camera"
+        app:fabSize="normal"
+        app:elevation="6dp"
+        app:backgroundTint="@color/white"
+        app:tint="@color/purple_500"
+        app:borderWidth="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:contentDescription="Take Photo" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/cameraButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginEnd="8dp"
-            android:text="Camera"
-            app:icon="@android:drawable/ic_menu_camera"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/processButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Process"
-            app:icon="@android:drawable/ic_menu_send"
-            style="@style/Widget.MaterialComponents.Button"/>
-
-    </LinearLayout>
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/processButton"
+        android:layout_width="wrap_content"
+        android:layout_height="56dp"
+        android:layout_marginBottom="16dp"
+        android:text="Process Image"
+        android:textSize="16sp"
+        android:paddingHorizontal="48dp"
+        android:elevation="4dp"
+        app:cornerRadius="28dp"
+        app:icon="@android:drawable/ic_menu_send"
+        app:iconGravity="textStart"
+        app:iconPadding="8dp"
+        app:iconTint="@color/white"
+        android:backgroundTint="@color/purple_500"
+        style="@style/Widget.MaterialComponents.Button"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
