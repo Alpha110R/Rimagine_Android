@@ -2,6 +2,7 @@ package com.example.rimagine.ui.Photo;
 
 import android.Manifest;
 import android.animation.ObjectAnimator;
+import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -25,6 +26,20 @@ import androidx.fragment.app.Fragment;
 import com.example.rimagine.R;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.button.MaterialButton;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.json.JSONArray;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class PhotoFragment extends Fragment {
 
@@ -55,6 +70,7 @@ public class PhotoFragment extends Fragment {
                 @Override
                 public void onActivityResult(Uri uri) {
                     if (uri != null) {
+                        imageUri = uri;  // Store the gallery image URI
                         showImage(uri);
                     }
                 }
@@ -189,6 +205,11 @@ public class PhotoFragment extends Fragment {
     }
 
     private void processImage() {
+        if (imageUri == null) {
+            Toast.makeText(requireContext(), "Please select an image first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         // Animate the process button
         ObjectAnimator rotationAnimator = ObjectAnimator.ofFloat(
                 processButton.getIcon(), "level", 0f, 10000f);
@@ -197,6 +218,180 @@ public class PhotoFragment extends Fragment {
 
         // Show processing toast
         Toast.makeText(requireContext(), "Processing image...", Toast.LENGTH_SHORT).show();
+
+        // Run the Python script in a background thread
+        new Thread(() -> {
+            try {
+                // Copy the image to our app's files directory
+                String imagePath = copyImageToAppFiles(imageUri);
+                if (imagePath == null) {
+                    throw new IOException("Could not copy image file");
+                }
+                
+                // Get the path to the Python script in assets
+                String pythonScriptPath = requireContext().getFilesDir() + "/predict.py";
+                String modelPath = requireContext().getFilesDir() + "/model.pt";
+                
+                // Copy the Python script and model from assets to files directory
+                copyAssetToFile("predict.py", pythonScriptPath);
+                copyAssetToFile("model.pt", modelPath);
+                
+                // Make the Python script executable
+                new File(pythonScriptPath).setExecutable(true);
+                
+                // Execute the Python script
+                ProcessBuilder processBuilder = new ProcessBuilder("python", pythonScriptPath, imagePath);
+                processBuilder.redirectErrorStream(true);
+                Process process = processBuilder.start();
+                
+                // Read the output
+                BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                StringBuilder output = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+                
+                // Wait for the process to complete
+                int exitCode = process.waitFor();
+                
+                // Parse the JSON output
+                JSONObject result = new JSONObject(output.toString());
+                
+                // Show the result on the main thread
+                requireActivity().runOnUiThread(() -> {
+                    try {
+                        if (exitCode == 0 && "success".equals(result.getString("status"))) {
+                            // Get the output image path
+                            String outputImagePath = result.getString("output_image");
+                            
+                            // Load and display the output image
+                            File outputImage = new File(outputImagePath);
+                            if (outputImage.exists()) {
+                                // Fade out current image
+                                photoImageView.animate()
+                                        .alpha(0f)
+                                        .setDuration(150)
+                                        .withEndAction(() -> {
+                                            // Set new image and fade it in
+                                            photoImageView.setImageURI(Uri.fromFile(outputImage));
+                                            photoImageView.animate()
+                                                    .alpha(1f)
+                                                    .setDuration(150)
+                                                    .start();
+                                        })
+                                        .start();
+                                
+                                // Show prediction details
+                                StringBuilder predictionText = new StringBuilder("Predictions:\n");
+                                JSONArray predictions = result.getJSONArray("predictions");
+                                for (int i = 0; i < predictions.length(); i++) {
+                                    JSONObject pred = predictions.getJSONObject(i);
+                                    try {
+                                        predictionText.append(String.format("%s (%.2f%%)\n", 
+                                            pred.getString("class"),
+                                            pred.getDouble("confidence") * 100));
+                                    } catch (JSONException e) {
+                                        predictionText.append("Error reading prediction details\n");
+                                    }
+                                }
+                                Toast.makeText(requireContext(), predictionText.toString(), Toast.LENGTH_LONG).show();
+                            } else {
+                                Toast.makeText(requireContext(), "Error: Output image not found", Toast.LENGTH_LONG).show();
+                            }
+                        } else {
+                            String errorMessage = "Error: Unknown error occurred";
+                            try {
+                                errorMessage = "Error: " + result.getString("message");
+                            } catch (JSONException e) {
+                                e.printStackTrace();
+                            }
+                            Toast.makeText(requireContext(), errorMessage, Toast.LENGTH_LONG).show();
+                        }
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                        Toast.makeText(requireContext(), 
+                            "Error parsing JSON response: " + e.getMessage(), 
+                            Toast.LENGTH_LONG).show();
+                    }
+                });
+                
+            } catch (Exception e) {
+                e.printStackTrace();
+                requireActivity().runOnUiThread(() -> {
+                    Toast.makeText(requireContext(), 
+                        "Error processing image: " + e.getMessage(), 
+                        Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * Copies the image from the given Uri to the app's files directory
+     * @return The path to the copied image file, or null if copying failed
+     */
+    private String copyImageToAppFiles(Uri sourceUri) {
+        try {
+            // Create a unique filename for the image
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String filename = "image_" + timestamp + ".jpg";
+            File destFile = new File(requireContext().getFilesDir(), filename);
+            
+            // Copy the image data
+            InputStream in = requireContext().getContentResolver().openInputStream(sourceUri);
+            if (in == null) {
+                return null;
+            }
+            
+            OutputStream out = new FileOutputStream(destFile);
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            
+            while ((bytesRead = in.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+            }
+            
+            in.close();
+            out.close();
+            
+            return destFile.getAbsolutePath();
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    /**
+     * Gets the real file path from a Uri
+     */
+    private String getRealPathFromUri(Uri uri) {
+        String[] projection = {MediaStore.Images.Media.DATA};
+        android.database.Cursor cursor = requireContext().getContentResolver().query(uri, projection, null, null, null);
+        
+        if (cursor == null) {
+            return null;
+        }
+        
+        int column_index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA);
+        cursor.moveToFirst();
+        String path = cursor.getString(column_index);
+        cursor.close();
+        
+        return path;
+    }
+
+    private void copyAssetToFile(String assetName, String filePath) throws IOException {
+        InputStream in = requireContext().getAssets().open(assetName);
+        File outFile = new File(filePath);
+        FileOutputStream out = new FileOutputStream(outFile);
+        byte[] buffer = new byte[1024];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+        in.close();
+        out.close();
     }
 }
 
