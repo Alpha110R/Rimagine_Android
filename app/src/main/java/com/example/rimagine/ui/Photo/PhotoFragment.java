@@ -5,9 +5,12 @@ import android.animation.ObjectAnimator;
 import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,9 +30,8 @@ import com.example.rimagine.R;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.button.MaterialButton;
 
-import org.json.JSONException;
-import org.json.JSONObject;
-import org.json.JSONArray;
+import com.example.rimagine.ml.TFLiteModelRunner;
+import java.util.Map;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -48,6 +50,7 @@ public class PhotoFragment extends Fragment {
     private FloatingActionButton cameraFab;
     private MaterialButton processButton;
     private Uri imageUri;
+    private TFLiteModelRunner modelRunner;
 
     private final ActivityResultLauncher<String> requestPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
@@ -75,6 +78,20 @@ public class PhotoFragment extends Fragment {
                     }
                 }
             });
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        modelRunner = new TFLiteModelRunner(requireContext());
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (modelRunner != null) {
+            modelRunner.close();
+        }
+    }
 
     @Nullable
     @Override
@@ -211,7 +228,7 @@ public class PhotoFragment extends Fragment {
         }
 
         // Animate the process button
-        ObjectAnimator rotationAnimator = ObjectAnimator.ofFloat(
+        @SuppressLint("ObjectAnimatorBinding") ObjectAnimator rotationAnimator = ObjectAnimator.ofFloat(
                 processButton.getIcon(), "level", 0f, 10000f);
         rotationAnimator.setDuration(1000);
         rotationAnimator.start();
@@ -219,7 +236,7 @@ public class PhotoFragment extends Fragment {
         // Show processing toast
         Toast.makeText(requireContext(), "Processing image...", Toast.LENGTH_SHORT).show();
 
-        // Run the Python script in a background thread
+        // Run inference in a background thread
         new Thread(() -> {
             try {
                 // Copy the image to our app's files directory
@@ -227,95 +244,42 @@ public class PhotoFragment extends Fragment {
                 if (imagePath == null) {
                     throw new IOException("Could not copy image file");
                 }
-                
-                // Get the path to the Python script in assets
-                String pythonScriptPath = requireContext().getFilesDir() + "/predict.py";
-                String modelPath = requireContext().getFilesDir() + "/model.pt";
-                
-                // Copy the Python script and model from assets to files directory
-                copyAssetToFile("predict.py", pythonScriptPath);
-                copyAssetToFile("model.pt", modelPath);
-                
-                // Make the Python script executable
-                new File(pythonScriptPath).setExecutable(true);
-                
-                // Execute the Python script
-                ProcessBuilder processBuilder = new ProcessBuilder("python", pythonScriptPath, imagePath);
-                processBuilder.redirectErrorStream(true);
-                Process process = processBuilder.start();
-                
-                // Read the output
-                BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-                StringBuilder output = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
+
+                // Convert image path to Bitmap
+                Bitmap bitmap = BitmapFactory.decodeFile(imagePath);
+                if (bitmap == null) {
+                    throw new IOException("Could not decode image file");
                 }
-                
-                // Wait for the process to complete
-                int exitCode = process.waitFor();
-                
-                // Parse the JSON output
-                JSONObject result = new JSONObject(output.toString());
-                
+
+                // Run the TFLite model
+                Map<String, Object> result = modelRunner.runInference(bitmap);
+
                 // Show the result on the main thread
                 requireActivity().runOnUiThread(() -> {
                     try {
-                        if (exitCode == 0 && "success".equals(result.getString("status"))) {
-                            // Get the output image path
-                            String outputImagePath = result.getString("output_image");
+                        if ("success".equals(result.get("status"))) {
+                            String processedImagePath = (String) result.get("output_image");
                             
-                            // Load and display the output image
-                            File outputImage = new File(outputImagePath);
-                            if (outputImage.exists()) {
-                                // Fade out current image
-                                photoImageView.animate()
-                                        .alpha(0f)
-                                        .setDuration(150)
-                                        .withEndAction(() -> {
-                                            // Set new image and fade it in
-                                            photoImageView.setImageURI(Uri.fromFile(outputImage));
-                                            photoImageView.animate()
-                                                    .alpha(1f)
-                                                    .setDuration(150)
-                                                    .start();
-                                        })
-                                        .start();
-                                
-                                // Show prediction details
-                                StringBuilder predictionText = new StringBuilder("Predictions:\n");
-                                JSONArray predictions = result.getJSONArray("predictions");
-                                for (int i = 0; i < predictions.length(); i++) {
-                                    JSONObject pred = predictions.getJSONObject(i);
-                                    try {
-                                        predictionText.append(String.format("%s (%.2f%%)\n", 
-                                            pred.getString("class"),
-                                            pred.getDouble("confidence") * 100));
-                                    } catch (JSONException e) {
-                                        predictionText.append("Error reading prediction details\n");
-                                    }
-                                }
-                                Toast.makeText(requireContext(), predictionText.toString(), Toast.LENGTH_LONG).show();
+                            // Update the ImageView with the processed image
+                            Bitmap processedBitmap = BitmapFactory.decodeFile(processedImagePath);
+                            if (processedBitmap != null) {
+                                photoImageView.setImageBitmap(processedBitmap);
+                                Toast.makeText(requireContext(), "Processing completed successfully", Toast.LENGTH_SHORT).show();
                             } else {
-                                Toast.makeText(requireContext(), "Error: Output image not found", Toast.LENGTH_LONG).show();
+                                Toast.makeText(requireContext(), "Error loading processed image", Toast.LENGTH_SHORT).show();
                             }
                         } else {
-                            String errorMessage = "Error: Unknown error occurred";
-                            try {
-                                errorMessage = "Error: " + result.getString("message");
-                            } catch (JSONException e) {
-                                e.printStackTrace();
-                            }
-                            Toast.makeText(requireContext(), errorMessage, Toast.LENGTH_LONG).show();
+                            String errorMessage = (String) result.get("message");
+                            Toast.makeText(requireContext(), "Error: " + errorMessage, Toast.LENGTH_SHORT).show();
                         }
-                    } catch (JSONException e) {
+                    } catch (Exception e) {
                         e.printStackTrace();
                         Toast.makeText(requireContext(), 
-                            "Error parsing JSON response: " + e.getMessage(), 
+                            "Error displaying results: " + e.getMessage(), 
                             Toast.LENGTH_LONG).show();
                     }
                 });
-                
+
             } catch (Exception e) {
                 e.printStackTrace();
                 requireActivity().runOnUiThread(() -> {
