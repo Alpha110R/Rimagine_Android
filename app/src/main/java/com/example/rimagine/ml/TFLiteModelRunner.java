@@ -24,20 +24,25 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class TFLiteModelRunner implements AutoCloseable {
     private static final String TAG = "TFLiteModelRunner";
-    private static final String MODEL_FILE = "best_float16.tflite";
-    private static final int INPUT_SIZE = 640; // Match model's input size
-    private static final float CONFIDENCE_THRESHOLD = 0.25f; // Lower threshold for more detections
-    private static final String[] CLASS_LABELS = {"front_disk", "back_disk"}; // Add your class labels here
+    private static final String MODEL_FILE = "best_float32.tflite";
+    private static final float CONFIDENCE_THRESHOLD = 0.6f; // Lower threshold for more detections
+    private static final String[] CLASS_LABELS = {"back_disk", "front_disk", "front_disk"}; // Add your class labels here
+    private static final float IOU_THRESHOLD = 0.2f; // IoU threshold for NMS
 
     private final Context context;
     private Interpreter interpreter;
     private ImageProcessor imageProcessor;
     private GpuDelegate gpuDelegate;
+    private int modelInputWidth;
+    private int modelInputHeight;
 
     public TFLiteModelRunner(Context context) {
         this.context = context;
@@ -68,9 +73,14 @@ public class TFLiteModelRunner implements AutoCloseable {
             interpreter = new Interpreter(FileUtil.loadMappedFile(context, MODEL_FILE), options);
             Log.d(TAG, "Model file loaded successfully");
             
-            // Initialize image processor
+            // Get model input dimensions
+            int[] inputShape = interpreter.getInputTensor(0).shape();
+            modelInputHeight = inputShape[1];
+            modelInputWidth = inputShape[2];
+            Log.d(TAG, "Model input dimensions: " + modelInputWidth + "x" + modelInputHeight);
+            
+            // Initialize image processor with normalization
             imageProcessor = new ImageProcessor.Builder()
-                    .add(new ResizeOp(INPUT_SIZE, INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
                     .add(new NormalizeOp(127.5f, 127.5f))
                     .build();
             Log.d(TAG, "Image processor initialized");
@@ -100,10 +110,10 @@ public class TFLiteModelRunner implements AutoCloseable {
             int[] inputShape = interpreter.getInputTensor(0).shape();
             Log.d(TAG, "Input tensor shape: " + java.util.Arrays.toString(inputShape));
             
-            // Calculate buffer size based on input shape
+            // Calculate buffer size based on model input shape
             int batchSize = inputShape[0];
-            int height = inputShape[1];
-            int width = inputShape[2];
+            int height = modelInputHeight;
+            int width = modelInputWidth;
             int channels = inputShape[3];
             
             Log.d(TAG, String.format("Creating buffer for: batch=%d, height=%d, width=%d, channels=%d", 
@@ -112,33 +122,12 @@ public class TFLiteModelRunner implements AutoCloseable {
             ByteBuffer inputBuffer = ByteBuffer.allocateDirect(batchSize * height * width * channels * 4);
             inputBuffer.order(ByteOrder.nativeOrder());
             
-            // Calculate scaling to maintain aspect ratio
-            float scale = Math.min((float)width / inputImage.getWidth(), 
-                                 (float)height / inputImage.getHeight());
-            
-            int scaledWidth = Math.round(inputImage.getWidth() * scale);
-            int scaledHeight = Math.round(inputImage.getHeight() * scale);
-            
-            // Create scaled bitmap maintaining aspect ratio
-            Bitmap scaledBitmap = Bitmap.createScaledBitmap(inputImage, scaledWidth, scaledHeight, true);
-            
-            // Create final bitmap with padding to reach target size
-            Bitmap paddedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(paddedBitmap);
-            canvas.drawColor(Color.BLACK); // Fill with black (0)
-            
-            // Calculate padding
-            int dx = (width - scaledWidth) / 2;
-            int dy = (height - scaledHeight) / 2;
-            
-            // Draw scaled image centered on padded bitmap
-            canvas.drawBitmap(scaledBitmap, dx, dy, null);
-            
-            Log.d(TAG, "Preprocessed image size: " + paddedBitmap.getWidth() + "x" + paddedBitmap.getHeight());
+            // Create a scaled bitmap for model input
+            Bitmap scaledBitmap = Bitmap.createScaledBitmap(inputImage, width, height, true);
             
             // Convert bitmap to byte buffer
             int[] pixels = new int[width * height];
-            paddedBitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+            scaledBitmap.getPixels(pixels, 0, width, 0, 0, width, height);
             
             Log.d(TAG, "Buffer capacity: " + inputBuffer.capacity() + " bytes");
             Log.d(TAG, "Number of pixels: " + pixels.length);
@@ -162,9 +151,8 @@ public class TFLiteModelRunner implements AutoCloseable {
             
             inputBuffer.rewind();
             
-            // Clean up intermediate bitmaps
+            // Clean up scaled bitmap
             scaledBitmap.recycle();
-            paddedBitmap.recycle();
             
             Log.d(TAG, "Input buffer size: " + inputBuffer.capacity() + " bytes");
             
@@ -221,18 +209,16 @@ public class TFLiteModelRunner implements AutoCloseable {
         float imageWidth = inputImage.getWidth();
         float imageHeight = inputImage.getHeight();
         
-        // Calculate scale factors to map from model input size to original image size
-        float scaleX = imageWidth / INPUT_SIZE;
-        float scaleY = imageHeight / INPUT_SIZE;
-        
         // Process detections
         float[][] predictions = detections[0]; // [8, 8400]
         
         Log.d(TAG, "Processing " + predictions[0].length + " potential detections");
-        Log.d(TAG, String.format("Image dimensions: %.0fx%.0f, Scale factors: %.2f, %.2f", 
-            imageWidth, imageHeight, scaleX, scaleY));
+        Log.d(TAG, String.format("Image dimensions: %.0fx%.0f", imageWidth, imageHeight));
         
-        // For each detection
+        // List to store all valid detections
+        List<Detection> validDetections = new ArrayList<>();
+        
+        // First pass: collect all valid detections
         for (int i = 0; i < predictions[0].length; i++) {
             // Find the highest confidence among all classes
             float maxConfidence = 0;
@@ -244,28 +230,19 @@ public class TFLiteModelRunner implements AutoCloseable {
                 }
             }
             
-            // Only draw boxes for confident detections
+            // Only consider detections above confidence threshold
             if (maxConfidence > CONFIDENCE_THRESHOLD) {
-                // Extract bounding box coordinates (in model input space)
-                float x = predictions[0][i] * INPUT_SIZE; // Center X
-                float y = predictions[1][i] * INPUT_SIZE; // Center Y
-                float w = predictions[2][i] * INPUT_SIZE; // Width
-                float h = predictions[3][i] * INPUT_SIZE; // Height
-                
-                // Scale coordinates to match original image dimensions
-                float centerX = x * scaleX;
-                float centerY = y * scaleY;
-                float width = w * scaleX;
-                float height = h * scaleY;
+                // Extract bounding box coordinates
+                float x = predictions[0][i] * imageWidth; // Center X
+                float y = predictions[1][i] * imageHeight; // Center Y
+                float w = predictions[2][i] * imageWidth; // Width
+                float h = predictions[3][i] * imageHeight; // Height
                 
                 // Calculate corner coordinates
-                float left = centerX - (width / 2);
-                float top = centerY - (height / 2);
-                float right = centerX + (width / 2);
-                float bottom = centerY + (height / 2);
-                
-                Log.d(TAG, String.format("Detection %d: class=%d, conf=%.2f, center=[%.1f, %.1f], size=[%.1f, %.1f]",
-                    i, bestClass, maxConfidence, centerX, centerY, width, height));
+                float left = x - (w / 2);
+                float top = y - (h / 2);
+                float right = x + (w / 2);
+                float bottom = y + (h / 2);
                 
                 // Ensure coordinates are within image bounds
                 left = Math.max(0, Math.min(left, imageWidth));
@@ -273,20 +250,53 @@ public class TFLiteModelRunner implements AutoCloseable {
                 right = Math.max(0, Math.min(right, imageWidth));
                 bottom = Math.max(0, Math.min(bottom, imageHeight));
                 
-                // Draw bounding box
-                canvas.drawRect(new RectF(left, top, right, bottom), boxPaint);
-                
-                // Draw class label and confidence
-                String label = String.format("%s %.2f", 
-                    bestClass < CLASS_LABELS.length ? CLASS_LABELS[bestClass] : "Class " + bestClass,
-                    maxConfidence);
-                    
-                float textWidth = textPaint.measureText(label);
-                Paint bgPaint = new Paint();
-                bgPaint.setColor(Color.argb(160, 0, 0, 0));
-                canvas.drawRect(left, top - textPaint.getTextSize(), left + textWidth, top, bgPaint);
-                canvas.drawText(label, left, top - textPaint.getTextSize()/4, textPaint);
+                validDetections.add(new Detection(left, top, right, bottom, maxConfidence, bestClass));
             }
+        }
+        
+        // Sort detections by confidence
+        Collections.sort(validDetections, (a, b) -> Float.compare(b.confidence, a.confidence));
+        
+        // Apply Non-Maximum Suppression
+        List<Detection> nmsDetections = new ArrayList<>();
+        boolean[] suppressed = new boolean[validDetections.size()];
+        
+        for (int i = 0; i < validDetections.size(); i++) {
+            if (suppressed[i]) continue;
+            
+            Detection detection = validDetections.get(i);
+            nmsDetections.add(detection);
+            
+            // Suppress overlapping detections of the same class
+            for (int j = i + 1; j < validDetections.size(); j++) {
+                if (suppressed[j]) continue;
+                
+                Detection other = validDetections.get(j);
+                if (detection.classId == other.classId && calculateIoU(detection, other) > IOU_THRESHOLD) {
+                    suppressed[j] = true;
+                }
+            }
+        }
+        
+        // Draw the filtered detections
+        for (Detection detection : nmsDetections) {
+            Log.d(TAG, String.format("Final Detection: class=%d, conf=%.2f, box=[%.1f, %.1f, %.1f, %.1f]",
+                detection.classId, detection.confidence, detection.left, detection.top, detection.right, detection.bottom));
+            
+            // Draw bounding box
+            canvas.drawRect(new RectF(detection.left, detection.top, detection.right, detection.bottom), boxPaint);
+            
+            // Draw class label and confidence
+            String label = String.format("%s %.2f", 
+                detection.classId < CLASS_LABELS.length ? CLASS_LABELS[detection.classId] : "Class " + detection.classId,
+                detection.confidence);
+                
+            float textWidth = textPaint.measureText(label);
+            Paint bgPaint = new Paint();
+            bgPaint.setColor(Color.argb(160, 0, 0, 0));
+            canvas.drawRect(detection.left, detection.top - textPaint.getTextSize(), 
+                          detection.left + textWidth, detection.top, bgPaint);
+            canvas.drawText(label, detection.left, detection.top - textPaint.getTextSize()/4, textPaint);
         }
         
         // Save the processed image
@@ -301,6 +311,38 @@ public class TFLiteModelRunner implements AutoCloseable {
         outputBitmap.recycle();
         
         return outputFile.getAbsolutePath();
+    }
+
+    private static class Detection {
+        float left, top, right, bottom;
+        float confidence;
+        int classId;
+
+        Detection(float left, float top, float right, float bottom, float confidence, int classId) {
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
+            this.confidence = confidence;
+            this.classId = classId;
+        }
+    }
+
+    private float calculateIoU(Detection a, Detection b) {
+        float intersectionLeft = Math.max(a.left, b.left);
+        float intersectionTop = Math.max(a.top, b.top);
+        float intersectionRight = Math.min(a.right, b.right);
+        float intersectionBottom = Math.min(a.bottom, b.bottom);
+        
+        if (intersectionRight < intersectionLeft || intersectionBottom < intersectionTop) {
+            return 0.0f;
+        }
+        
+        float intersectionArea = (intersectionRight - intersectionLeft) * (intersectionBottom - intersectionTop);
+        float aArea = (a.right - a.left) * (a.bottom - a.top);
+        float bArea = (b.right - b.left) * (b.bottom - b.top);
+        
+        return intersectionArea / (aArea + bArea - intersectionArea);
     }
 
     @Override
